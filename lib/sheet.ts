@@ -57,21 +57,43 @@ export function parseCsv(input: string): string[][] {
   return rows;
 }
 
-/** Turns CSV rows into "[หมวด] คำถาม: ... | คำตอบ: ..." lines (one FAQ per line). */
-export function formatFaq(rows: string[][]): string {
+// Accepted header names (Thai + English), compared after normalizeHeader().
+const HEADER_ALIASES = {
+  category: ["หมวด", "category"],
+  question: ["คำถาม", "question"],
+  answer: ["คำตอบ", "answer"],
+} as const;
+
+/** Lowercase and drop all whitespace (and any BOM) so " Question " / "คำ ถาม" still match. */
+function normalizeHeader(h: string): string {
+  return h.replace(/﻿/g, "").replace(/\s+/g, "").toLowerCase();
+}
+
+/**
+ * Turns CSV rows into "[หมวด] คำถาม: ... | คำตอบ: ..." lines (one FAQ per line).
+ * The first non-empty row is the header. Headers may be Thai or English; if they match
+ * neither, columns 1, 2, 3 are used as category, question, answer.
+ */
+export function formatFaq(rows: string[][]): string[] {
   const cleaned = rows
     .map((r) => r.map((c) => c.trim()))
     .filter((r) => r.some((c) => c !== ""));
-  if (cleaned.length === 0) return "";
+  if (cleaned.length === 0) return [];
 
-  const header = cleaned[0].map((h) => h.toLowerCase());
-  const col = (name: string, fallback: number) => {
-    const idx = header.indexOf(name);
-    return idx >= 0 ? idx : fallback;
-  };
-  const iCategory = col("category", 0);
-  const iQuestion = col("question", 1);
-  const iAnswer = col("answer", 2);
+  const header = cleaned[0].map(normalizeHeader);
+  const findCol = (aliases: readonly string[]) =>
+    header.findIndex((h) => aliases.some((a) => normalizeHeader(a) === h));
+
+  let iCategory = findCol(HEADER_ALIASES.category);
+  let iQuestion = findCol(HEADER_ALIASES.question);
+  let iAnswer = findCol(HEADER_ALIASES.answer);
+  if (iCategory < 0 || iQuestion < 0 || iAnswer < 0) {
+    console.warn("SHEET_HEADER_FALLBACK", { header: cleaned[0], using: "columns 1, 2, 3" });
+    [iCategory, iQuestion, iAnswer] = [0, 1, 2];
+  }
+
+  // Keep each FAQ on a single line.
+  const oneLine = (s: string) => s.replace(/\s*\r?\n\s*/g, " ");
 
   return cleaned
     .slice(1)
@@ -81,12 +103,7 @@ export function formatFaq(rows: string[][]): string {
       answer: r[iAnswer] ?? "",
     }))
     .filter((f) => f.question !== "" || f.answer !== "")
-    .map((f) => {
-      // Keep each FAQ on a single line.
-      const oneLine = (s: string) => s.replace(/\s*\r?\n\s*/g, " ");
-      return `[${oneLine(f.category)}] คำถาม: ${oneLine(f.question)} | คำตอบ: ${oneLine(f.answer)}`;
-    })
-    .join("\n");
+    .map((f) => `[${oneLine(f.category)}] คำถาม: ${oneLine(f.question)} | คำตอบ: ${oneLine(f.answer)}`);
 }
 
 async function fetchFaq(url: string): Promise<string> {
@@ -108,9 +125,10 @@ async function fetchFaq(url: string): Promise<string> {
       throw new Error(`Sheet fetch failed (status ${res.status})`);
     }
 
-    const faq = formatFaq(parseCsv(body));
-    if (!faq) throw new Error("Sheet has no FAQ rows");
-    return faq;
+    const lines = formatFaq(parseCsv(body.replace(/^﻿/, "")));
+    console.log("SHEET_LOADED", { faqCount: lines.length, firstRows: lines.slice(0, 2) });
+    if (lines.length === 0) throw new Error("Sheet has no FAQ rows");
+    return lines.join("\n");
   } finally {
     clearTimeout(timer);
   }
