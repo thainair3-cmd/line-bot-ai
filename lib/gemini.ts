@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import {
   DEFAULT_REPLY,
   GEMINI_MAX_OUTPUT_TOKENS,
@@ -71,6 +71,8 @@ export async function askGemini(faq: string, question: string): Promise<string> 
           systemInstruction: SYSTEM_INSTRUCTION,
           temperature: GEMINI_TEMPERATURE,
           maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+          // FAQ lookup needs no deep reasoning: use the lowest thinking level (Gemini 3.x).
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           abortSignal: controller.signal,
         },
       }),
@@ -94,5 +96,7 @@ export async function askGemini(faq: string, question: string): Promise<string> 
     return DEFAULT_REPLY;
   } finally {
     clearTimeout(timer);
+    // Logged on every request, success or failure.
+    console.log("GEMINI_ELAPSED", { elapsedMs: Date.now() - startedAt });
   }
 }
