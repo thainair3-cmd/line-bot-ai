@@ -1,8 +1,10 @@
-import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { ApiError, GoogleGenAI, ThinkingLevel, type GenerateContentConfig } from "@google/genai";
 import {
   DEFAULT_REPLY,
+  GEMINI_DEFAULT_MODEL,
+  GEMINI_FALLBACK_MODELS,
   GEMINI_MAX_OUTPUT_TOKENS,
-  GEMINI_MODEL,
+  GEMINI_MIN_RETRY_MS,
   GEMINI_TEMPERATURE,
   GEMINI_TIMEOUT_MS,
   LINE_TEXT_MAX_LENGTH,
@@ -48,58 +50,116 @@ export function cleanReply(text: string): string {
 }
 
 class GeminiTimeoutError extends Error {
-  constructor() {
-    super(`Gemini timed out after ${GEMINI_TIMEOUT_MS}ms`);
+  constructor(ms: number) {
+    super(`Gemini timed out after ${ms}ms`);
   }
 }
 
-export async function askGemini(faq: string, question: string): Promise<string> {
-  const startedAt = Date.now();
+/** Model from env GEMINI_MODEL if set, otherwise the code default. */
+function primaryModel(): string {
+  return process.env.GEMINI_MODEL?.trim() || GEMINI_DEFAULT_MODEL;
+}
+
+/** First fallback that differs from the primary model. */
+function fallbackModel(primary: string): string | undefined {
+  return GEMINI_FALLBACK_MODELS.find((m) => m !== primary);
+}
+
+/**
+ * Lowest thinking setting per model family:
+ * Gemini 3.x supports thinkingLevel MINIMAL; Gemini 2.5 flash-lite has thinking off by default
+ * (no MINIMAL level), so send no thinkingConfig for it or any non-3.x model.
+ */
+function thinkingConfigFor(model: string): GenerateContentConfig["thinkingConfig"] {
+  return /^gemini-[3-9]/.test(model) ? { thinkingLevel: ThinkingLevel.MINIMAL } : undefined;
+}
+
+/** 429 = quota exhausted, 503 = model overloaded: worth one retry on another model. */
+function isRetryable(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 429 || err.status === 503);
+}
+
+async function callModel(model: string, contents: string, timeoutMs: number) {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
-
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new GeminiTimeoutError());
-    }, GEMINI_TIMEOUT_MS);
+      reject(new GeminiTimeoutError(timeoutMs));
+    }, timeoutMs);
   });
 
   try {
-    const response = await Promise.race([
+    return await Promise.race([
       getClient().models.generateContent({
-        model: GEMINI_MODEL,
-        contents: buildContents(faq, question),
+        model,
+        contents,
         config: {
           systemInstruction: SYSTEM_INSTRUCTION,
           temperature: GEMINI_TEMPERATURE,
           maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-          // FAQ lookup needs no deep reasoning: use the lowest thinking level (Gemini 3.x).
-          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+          thinkingConfig: thinkingConfigFor(model),
           abortSignal: controller.signal,
         },
       }),
       timeout,
     ]);
-
-    const finishReason = response.candidates?.[0]?.finishReason;
-    console.log("GEMINI_RESULT", {
-      finishReason,
-      thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
-      candidatesTokenCount: response.usageMetadata?.candidatesTokenCount,
-      elapsedMs: Date.now() - startedAt,
-    });
-
-    const text = cleanReply(response.text ?? "");
-    if (finishReason === "MAX_TOKENS" || text === "") return DEFAULT_REPLY;
-    return text;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("GEMINI_ERROR", { message, elapsedMs: Date.now() - startedAt });
-    return DEFAULT_REPLY;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export async function askGemini(faq: string, question: string): Promise<string> {
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
+  const contents = buildContents(faq, question);
+
+  const primary = primaryModel();
+  const fallback = fallbackModel(primary);
+  const attempts = fallback ? [primary, fallback] : [primary];
+
+  try {
+    for (let i = 0; i < attempts.length; i++) {
+      const model = attempts[i];
+      // All attempts share one overall budget of GEMINI_TIMEOUT_MS.
+      const remainingMs = GEMINI_TIMEOUT_MS - elapsed();
+
+      try {
+        const response = await callModel(model, contents, remainingMs);
+        const finishReason = response.candidates?.[0]?.finishReason;
+        console.log("GEMINI_RESULT", {
+          model,
+          attempt: i + 1,
+          finishReason,
+          thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
+          candidatesTokenCount: response.usageMetadata?.candidatesTokenCount,
+          elapsedMs: elapsed(),
+        });
+
+        const text = cleanReply(response.text ?? "");
+        if (finishReason === "MAX_TOKENS" || text === "") return DEFAULT_REPLY;
+        return text;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const status = err instanceof ApiError ? err.status : undefined;
+        const hasNext = i + 1 < attempts.length;
+        const timeLeft = GEMINI_TIMEOUT_MS - elapsed();
+        const willRetry = hasNext && isRetryable(err) && timeLeft >= GEMINI_MIN_RETRY_MS;
+
+        console.error("GEMINI_ERROR", {
+          model,
+          attempt: i + 1,
+          status,
+          message,
+          elapsedMs: elapsed(),
+          retryWith: willRetry ? attempts[i + 1] : undefined,
+        });
+        if (!willRetry) return DEFAULT_REPLY;
+      }
+    }
+    return DEFAULT_REPLY;
+  } finally {
     // Logged on every request, success or failure.
-    console.log("GEMINI_ELAPSED", { elapsedMs: Date.now() - startedAt });
+    console.log("GEMINI_ELAPSED", { elapsedMs: elapsed() });
   }
 }

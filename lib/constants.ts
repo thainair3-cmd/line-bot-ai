@@ -5,7 +5,12 @@ export const NON_TEXT_REPLY =
   "ขออภัยค่ะ ตอนนี้น้องแอดมินตอบได้เฉพาะข้อความตัวอักษรนะคะ 🙏";
 
 // Gemini
-export const GEMINI_MODEL = "gemini-3.5-flash";
+// Default model (override with env GEMINI_MODEL) and the fallback tried once on 429/503.
+// Both are stable flash-lite models with separate quotas.
+export const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite";
+export const GEMINI_FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"];
+// Only retry if at least this much of the overall budget is left.
+export const GEMINI_MIN_RETRY_MS = 2_000;
 export const GEMINI_TEMPERATURE = 1.0; // do not lower
 export const GEMINI_MAX_OUTPUT_TOKENS = 1024; // Gemini 3.x counts thinking + answer together
 export const GEMINI_TIMEOUT_MS = 8_500;
