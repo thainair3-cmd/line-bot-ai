@@ -3,6 +3,7 @@ import {
   DEFAULT_REPLY,
   GEMINI_DEFAULT_MODEL,
   GEMINI_FALLBACK_MODELS,
+  GEMINI_FIRST_ATTEMPT_TIMEOUT_MS,
   GEMINI_MAX_OUTPUT_TOKENS,
   GEMINI_MIN_RETRY_MS,
   GEMINI_TEMPERATURE,
@@ -74,8 +75,9 @@ function thinkingConfigFor(model: string): GenerateContentConfig["thinkingConfig
   return /^gemini-[3-9]/.test(model) ? { thinkingLevel: ThinkingLevel.MINIMAL } : undefined;
 }
 
-/** 429 = quota exhausted, 503 = model overloaded: worth one retry on another model. */
+/** Timeout, 429 (quota exhausted) or 503 (overloaded): worth one retry on another model. */
 function isRetryable(err: unknown): boolean {
+  if (err instanceof GeminiTimeoutError) return true;
   return err instanceof ApiError && (err.status === 429 || err.status === 503);
 }
 
@@ -121,15 +123,21 @@ export async function askGemini(faq: string, question: string): Promise<string> 
   try {
     for (let i = 0; i < attempts.length; i++) {
       const model = attempts[i];
-      // All attempts share one overall budget of GEMINI_TIMEOUT_MS.
+      // All attempts share one overall budget of GEMINI_TIMEOUT_MS. The first attempt is capped
+      // so a slow primary model still leaves time for the fallback.
       const remainingMs = GEMINI_TIMEOUT_MS - elapsed();
+      const isLast = i + 1 === attempts.length;
+      const timeoutMs = isLast ? remainingMs : Math.min(GEMINI_FIRST_ATTEMPT_TIMEOUT_MS, remainingMs);
+      const attemptStartedAt = Date.now();
 
       try {
-        const response = await callModel(model, contents, remainingMs);
+        const response = await callModel(model, contents, timeoutMs);
         const finishReason = response.candidates?.[0]?.finishReason;
         console.log("GEMINI_RESULT", {
           model,
           attempt: i + 1,
+          attemptMs: Date.now() - attemptStartedAt,
+          timeoutMs,
           finishReason,
           thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
           candidatesTokenCount: response.usageMetadata?.candidatesTokenCount,
@@ -149,6 +157,8 @@ export async function askGemini(faq: string, question: string): Promise<string> 
         console.error("GEMINI_ERROR", {
           model,
           attempt: i + 1,
+          attemptMs: Date.now() - attemptStartedAt,
+          timeoutMs,
           status,
           message,
           elapsedMs: elapsed(),
