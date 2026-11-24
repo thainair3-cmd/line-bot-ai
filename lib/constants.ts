@@ -12,7 +12,7 @@ export const GEMINI_TIMEOUT_MS = 8_500;
 
 // Google Sheet FAQ
 export const SHEET_CACHE_TTL_MS = 60_000;
-export const SHEET_FETCH_TIMEOUT_MS = 2_000;
+export const SHEET_FETCH_TIMEOUT_MS = 1_000; // on timeout, getFaq() falls back to the stale cache
 
 // LINE
 export const LINE_TEXT_MAX_LENGTH = 5_000;
