@@ -184,35 +184,70 @@ function normalizeName(name: string): string {
   return n.replace(/\s+/g, "").toLowerCase();
 }
 
-/** Slip names are often truncated/masked ("ไทยแน่ x", "THAINAI***"); match if any visible part overlaps the shop name. */
-function nameMatches(slipName: string, shopName: string): boolean {
+/**
+ * Slip names are often truncated/masked ("ไทยแน่ x", "THAINAI***"). A visible part (3+ chars) matches if it
+ * contains or is contained in the shop name. Returns 0 for no match, otherwise overlap / longer length (0..1],
+ * so the shop name closest in length to what the slip shows scores highest.
+ */
+function nameMatchScore(slipName: string, shopName: string): number {
   const shop = normalizeName(shopName);
-  if (!shop) return false;
+  if (!shop) return 0;
   const parts = normalizeName(slipName)
     .split(/\*+|x{2,}|\.+/i)
     .map((p) => p.replace(/x$/i, ""))
     .filter((p) => p.length >= 3);
-  return parts.some((p) => shop.includes(p) || p.includes(shop));
+  let best = 0;
+  for (const p of parts) {
+    if (shop.includes(p) || p.includes(shop)) {
+      best = Math.max(best, Math.min(p.length, shop.length) / Math.max(p.length, shop.length));
+    }
+  }
+  return best;
 }
 
-/** true/false = checked; null = skipped because no shop env is configured. */
-function checkReceiver(receiver: SlipParty | undefined): boolean | null {
-  const shopDigits = process.env.SHOP_ACCOUNT_LAST_DIGITS?.trim();
-  const shopName = process.env.SHOP_ACCOUNT_NAME?.trim();
-  if (!shopDigits && !shopName) {
+/** Comma-separated env list, each value trimmed, empty values dropped. A single value (no comma) is a 1-item list. */
+function envList(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+/**
+ * matched: true/false = checked; null = skipped because no shop env is configured.
+ * matchedBy/matchedIndex: which list matched and the 0-based position of the value in it (no names/numbers).
+ */
+type ReceiverCheck = { matched: boolean | null; matchedBy?: "account" | "name"; matchedIndex?: number };
+
+function checkReceiver(receiver: SlipParty | undefined): ReceiverCheck {
+  const shopDigitsList = envList("SHOP_ACCOUNT_LAST_DIGITS");
+  const shopNameList = envList("SHOP_ACCOUNT_NAME");
+  if (shopDigitsList.length === 0 && shopNameList.length === 0) {
     console.warn("SLIP_RECEIVER_CHECK_SKIPPED", { reason: "SHOP_ACCOUNT_LAST_DIGITS and SHOP_ACCOUNT_NAME not set" });
-    return null;
+    return { matched: null };
   }
 
   const account = receiver?.account;
   const slipAccount = account?.bank?.account;
-  if (shopDigits && slipAccount && accountMatches(slipAccount, shopDigits)) return true;
-
-  if (shopName) {
-    const names = [account?.name?.th, account?.name?.en].filter((n): n is string => Boolean(n));
-    if (names.some((n) => nameMatches(n, shopName))) return true;
+  if (slipAccount) {
+    const i = shopDigitsList.findIndex((digits) => accountMatches(slipAccount, digits));
+    if (i >= 0) return { matched: true, matchedBy: "account", matchedIndex: i };
   }
-  return false;
+
+  // Names can overlap (e.g. "ไทยแน่" vs "ไทยแน่ เทรดดิ้ง"): pick the shop name with the best match score.
+  const names = [account?.name?.th, account?.name?.en].filter((n): n is string => Boolean(n));
+  let best = -1;
+  let bestScore = 0;
+  shopNameList.forEach((shopName, idx) => {
+    const score = Math.max(0, ...names.map((n) => nameMatchScore(n, shopName)));
+    if (score > bestScore) {
+      best = idx;
+      bestScore = score;
+    }
+  });
+  if (best >= 0) return { matched: true, matchedBy: "name", matchedIndex: best };
+
+  return { matched: false };
 }
 
 // ---- Formatting ----
@@ -281,13 +316,16 @@ async function checkSlipInner(messageId: string, contentProviderType: string): P
     if (verifyTimeout <= 0) throw new SlipError("TIMEOUT");
     const data = await verifyWithEasySlip(image, apiKey, verifyTimeout);
 
-    const receiverMatched = data.isDuplicate ? undefined : checkReceiver(data.rawSlip.receiver);
+    const receiverCheck = data.isDuplicate ? undefined : checkReceiver(data.rawSlip.receiver);
+    const receiverMatched = receiverCheck?.matched;
     const amount = data.amountInSlip ?? data.rawSlip.amount?.amount;
     console.log("SLIP_RESULT", {
       isDuplicate: data.isDuplicate,
       amountInSlip: amount,
       transRef: data.rawSlip.transRef,
       receiverMatched,
+      matchedBy: receiverCheck?.matchedBy,
+      matchedIndex: receiverCheck?.matchedIndex,
       elapsedMs: elapsed(),
     });
 
