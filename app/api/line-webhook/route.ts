@@ -1,7 +1,8 @@
 import { HTTPFetchError, messagingApi, validateSignature, type WebhookEvent } from "@line/bot-sdk";
 import { askGemini } from "@/lib/gemini";
 import { getFaq } from "@/lib/sheet";
-import { DEFAULT_REPLY, NON_TEXT_REPLY } from "@/lib/constants";
+import { checkSlip } from "@/lib/slip";
+import { DEFAULT_REPLY, UNSUPPORTED_MESSAGE_REPLY } from "@/lib/constants";
 
 export const runtime = "nodejs";
 export const maxDuration = 10;
@@ -35,8 +36,15 @@ async function handleEvent(event: WebhookEvent): Promise<void> {
   if (event.deliveryContext?.isRedelivery) return;
   if (event.type !== "message") return;
 
+  // Images are checked as transfer slips via EasySlip (never sent to Gemini).
+  if (event.message.type === "image") {
+    const answer = await checkSlip(event.message.id, event.message.contentProvider.type);
+    await reply(event.replyToken, answer);
+    return;
+  }
+
   if (event.message.type !== "text") {
-    await reply(event.replyToken, NON_TEXT_REPLY);
+    await reply(event.replyToken, UNSUPPORTED_MESSAGE_REPLY);
     return;
   }
 

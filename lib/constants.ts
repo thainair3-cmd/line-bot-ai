@@ -1,8 +1,14 @@
 export const DEFAULT_REPLY =
   "ขออภัยค่ะ เรื่องนี้น้องแอดมินขอส่งต่อให้เจ้าหน้าที่ติดต่อกลับโดยเร็วที่สุดนะคะ 🙏";
 
-export const NON_TEXT_REPLY =
-  "ขออภัยค่ะ ตอนนี้น้องแอดมินตอบได้เฉพาะข้อความตัวอักษรนะคะ 🙏";
+export const UNSUPPORTED_MESSAGE_REPLY =
+  "ขออภัยค่ะ ตอนนี้น้องแอดมินรองรับเฉพาะข้อความตัวอักษรและรูปสลิปโอนเงินนะคะ 🙏";
+
+// Slip verification (EasySlip). The whole slip flow must finish within SLIP_TOTAL_BUDGET_MS.
+export const SLIP_TOTAL_BUDGET_MS = 9_000;
+export const SLIP_DOWNLOAD_TIMEOUT_MS = 1_800;
+export const SLIP_VERIFY_TIMEOUT_MS = 7_000;
+export const SLIP_MAX_IMAGE_BYTES = 4 * 1024 * 1024; // EasySlip limit: 4 MB
 
 // Gemini
 // Default model (override with env GEMINI_MODEL) and the fallback tried once on 429/503.
