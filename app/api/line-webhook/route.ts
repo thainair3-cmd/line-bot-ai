@@ -1,7 +1,7 @@
 import { HTTPFetchError, messagingApi, validateSignature, type WebhookEvent } from "@line/bot-sdk";
 import { askGemini } from "@/lib/gemini";
 import { getFaq } from "@/lib/sheet";
-import { checkSlip } from "@/lib/slip";
+import { checkSlip, type SlipReply } from "@/lib/slip";
 import { DEFAULT_REPLY, UNSUPPORTED_MESSAGE_REPLY } from "@/lib/constants";
 
 export const runtime = "nodejs";
@@ -17,17 +17,40 @@ function getLineClient(): messagingApi.MessagingApiClient {
   return lineClient;
 }
 
-async function reply(replyToken: string, text: string): Promise<void> {
+function logReplyError(tag: string, err: unknown): void {
+  if (err instanceof HTTPFetchError) {
+    console.error(tag, { status: err.status, body: err.body });
+  } else {
+    console.error(tag, { status: null, body: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function replyMessages(replyToken: string, messages: messagingApi.Message[]): Promise<void> {
   try {
-    await getLineClient().replyMessage({
-      replyToken,
-      messages: [{ type: "text", text }],
-    });
+    await getLineClient().replyMessage({ replyToken, messages });
   } catch (err) {
-    if (err instanceof HTTPFetchError) {
-      console.error("LINE_REPLY_ERROR", { status: err.status, body: err.body });
+    logReplyError("LINE_REPLY_ERROR", err);
+  }
+}
+
+async function reply(replyToken: string, text: string): Promise<void> {
+  await replyMessages(replyToken, [{ type: "text", text }]);
+}
+
+/**
+ * Sends the slip result (Flex card + text). If LINE rejects it with 400 (e.g. invalid Flex),
+ * logs FLEX_ERROR and sends the plain-text version instead; a rejected request does not use up the replyToken.
+ */
+async function replySlip(replyToken: string, slip: SlipReply): Promise<void> {
+  try {
+    await getLineClient().replyMessage({ replyToken, messages: slip.messages });
+  } catch (err) {
+    if (err instanceof HTTPFetchError && err.status === 400 && slip.fallbackText) {
+      // LINE's 400 body names the invalid property path, not the message values.
+      logReplyError("FLEX_ERROR", err);
+      await reply(replyToken, slip.fallbackText);
     } else {
-      console.error("LINE_REPLY_ERROR", { status: null, body: err instanceof Error ? err.message : String(err) });
+      logReplyError("LINE_REPLY_ERROR", err);
     }
   }
 }
@@ -38,8 +61,8 @@ async function handleEvent(event: WebhookEvent): Promise<void> {
 
   // Images are checked as transfer slips via EasySlip (never sent to Gemini).
   if (event.message.type === "image") {
-    const answer = await checkSlip(event.message.id, event.message.contentProvider.type);
-    await reply(event.replyToken, answer);
+    const slip = await checkSlip(event.message.id, event.message.contentProvider.type);
+    await replySlip(event.replyToken, slip);
     return;
   }
 

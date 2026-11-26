@@ -6,10 +6,20 @@ import {
   SLIP_TOTAL_BUDGET_MS,
   SLIP_VERIFY_TIMEOUT_MS,
 } from "./constants";
+import { buildSlipFlex, type CardParty, type SlipStatus } from "./slip-flex";
 
 const EASYSLIP_VERIFY_URL = "https://api.easyslip.com/v2/verify/bank";
 
+/**
+ * What to send back for an image. `messages` is tried first; if LINE rejects it (e.g. invalid Flex),
+ * the caller sends `fallbackText` as a plain text message instead.
+ */
+export type SlipReply = { messages: messagingApi.Message[]; fallbackText?: string };
+
+const textMessage = (text: string): messagingApi.TextMessage => ({ type: "text", text });
+
 export const SLIP_REPLY = {
+  okShort: "ได้รับสลิปเรียบร้อยค่ะ เจ้าหน้าที่จะดำเนินการต่อให้นะคะ 🙏",
   duplicate: "สลิปนี้เคยส่งเข้ามาแล้วค่ะ รบกวนตรวจสอบอีกครั้ง หรือรอเจ้าหน้าที่ติดต่อกลับนะคะ 🙏",
   receiverMismatch: "บัญชีผู้รับในสลิปไม่ตรงกับบัญชีของร้านค่ะ รบกวนตรวจสอบอีกครั้งนะคะ 🙏",
   notFound:
@@ -22,6 +32,7 @@ export const SLIP_REPLY = {
 // ---- EasySlip v2 response types (only the fields we use) ----
 
 type SlipParty = {
+  bank?: { id?: string; name?: string; short?: string };
   account?: {
     name?: { th?: string; en?: string };
     bank?: { type?: string; account?: string };
@@ -38,6 +49,7 @@ type EasySlipSuccess = {
       transRef: string;
       date: string;
       amount?: { amount?: number };
+      sender?: SlipParty;
       receiver?: SlipParty;
     };
   };
@@ -205,17 +217,27 @@ function checkReceiver(receiver: SlipParty | undefined): boolean | null {
 
 // ---- Formatting ----
 
-function formatThaiDate(iso: string): string {
+/** Thai date in Bangkok time: "25 พ.ย. 2569 10:43", or with shortYear "25 พ.ย. 69 10:43". */
+function formatThaiDate(iso: string, shortYear = false): string {
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  if (Number.isNaN(d.getTime())) return iso || "-";
   return d.toLocaleString("th-TH", {
     timeZone: "Asia/Bangkok",
     day: "numeric",
     month: "short",
-    year: "numeric",
+    year: shortYear ? "2-digit" : "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/** Card view of a party: bank short code, name and the account number exactly as EasySlip returns it (masked). */
+function toCardParty(p: SlipParty | undefined): CardParty {
+  return {
+    bankShort: p?.bank?.short,
+    name: p?.account?.name?.th || p?.account?.name?.en,
+    account: p?.account?.bank?.account || p?.account?.proxy?.account,
+  };
 }
 
 function formatAmount(amount: number | undefined): string {
@@ -225,8 +247,17 @@ function formatAmount(amount: number | undefined): string {
 
 // ---- Main ----
 
-/** Verifies a LINE image message as a bank transfer slip and returns the reply text for the customer. */
-export async function checkSlip(messageId: string, contentProviderType: string): Promise<string> {
+/**
+ * Verifies a LINE image message as a bank transfer slip.
+ * Verified results (ok / duplicate / receiver mismatch) reply with a Flex card plus a short text;
+ * errors reply with plain text only.
+ */
+export async function checkSlip(messageId: string, contentProviderType: string): Promise<SlipReply> {
+  const reply = await checkSlipInner(messageId, contentProviderType);
+  return typeof reply === "string" ? { messages: [textMessage(reply)] } : reply;
+}
+
+async function checkSlipInner(messageId: string, contentProviderType: string): Promise<SlipReply | string> {
   const startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
 
@@ -260,12 +291,31 @@ export async function checkSlip(messageId: string, contentProviderType: string):
       elapsedMs: elapsed(),
     });
 
-    if (data.isDuplicate) return SLIP_REPLY.duplicate;
-    if (receiverMatched === false) return SLIP_REPLY.receiverMismatch;
-    return (
-      `ได้รับสลิปเรียบร้อยค่ะ ✅ ยอด ${formatAmount(amount)} บาท วันที่ ${formatThaiDate(data.rawSlip.date)} ` +
-      `เลขอ้างอิง ${data.rawSlip.transRef}\nเจ้าหน้าที่จะดำเนินการต่อให้นะคะ`
-    );
+    const status: SlipStatus = data.isDuplicate
+      ? "duplicate"
+      : receiverMatched === false
+        ? "receiverMismatch"
+        : "ok";
+
+    const plainText = {
+      duplicate: SLIP_REPLY.duplicate,
+      receiverMismatch: SLIP_REPLY.receiverMismatch,
+      ok:
+        `ได้รับสลิปเรียบร้อยค่ะ ✅ ยอด ${formatAmount(amount)} บาท วันที่ ${formatThaiDate(data.rawSlip.date)} ` +
+        `เลขอ้างอิง ${data.rawSlip.transRef}\nเจ้าหน้าที่จะดำเนินการต่อให้นะคะ`,
+    }[status];
+
+    const flex = buildSlipFlex({
+      status,
+      amountText: formatAmount(amount),
+      dateText: formatThaiDate(data.rawSlip.date, true),
+      transRef: data.rawSlip.transRef || "-",
+      sender: toCardParty(data.rawSlip.sender),
+      receiver: toCardParty(data.rawSlip.receiver),
+    });
+    const shortText = status === "ok" ? SLIP_REPLY.okShort : plainText;
+
+    return { messages: [flex, textMessage(shortText)], fallbackText: plainText };
   } catch (err) {
     const code = err instanceof SlipError ? err.code : "UNEXPECTED_ERROR";
     const httpStatus = err instanceof SlipError ? err.httpStatus : (err as { status?: number })?.status;
