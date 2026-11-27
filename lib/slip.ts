@@ -3,10 +3,13 @@ import type { Readable } from "node:stream";
 import {
   SLIP_DOWNLOAD_TIMEOUT_MS,
   SLIP_MAX_IMAGE_BYTES,
+  SLIP_MIN_IMAGE_FALLBACK_MS,
+  SLIP_QR_DECODE_BUDGET_MS,
   SLIP_TOTAL_BUDGET_MS,
   SLIP_VERIFY_TIMEOUT_MS,
 } from "./constants";
 import { buildSlipFlex, type CardParty, type SlipStatus } from "./slip-flex";
+import { decodeQr } from "./qr";
 
 const EASYSLIP_VERIFY_URL = "https://api.easyslip.com/v2/verify/bank";
 
@@ -27,6 +30,9 @@ export const SLIP_REPLY = {
   pending: "สลิปธนาคารกรุงเทพที่เพิ่งโอนอาจยังตรวจไม่ได้ค่ะ รบกวนส่งใหม่อีกครั้งในอีก 5 นาทีนะคะ 🙏",
   tooLarge: "รูปนี้มีขนาดใหญ่เกินไปค่ะ (เกิน 4 MB) รบกวนส่งรูปสลิปที่ขนาดเล็กลงอีกครั้งนะคะ 🙏",
   error: "ขออภัยค่ะ ระบบตรวจสลิปขัดข้องชั่วคราว เจ้าหน้าที่จะตรวจสอบให้โดยเร็วที่สุดนะคะ 🙏",
+  validation:
+    "น้องแอดมินตรวจสลิปนี้อัตโนมัติไม่ได้ค่ะ รบกวนส่งรูปสลิปจากแอปธนาคารโดยตรง (ไม่ใช่ภาพแคปหน้าจอ) อีกครั้ง หรือรอเจ้าหน้าที่ตรวจสอบให้นะคะ 🙏",
+  resend: "รบกวนส่งรูปสลิปอีกครั้งนะคะ 🙏",
 } as const;
 
 // ---- EasySlip v2 response types (only the fields we use) ----
@@ -60,10 +66,13 @@ type EasySlipFailure = { success: false; error?: { code?: string; message?: stri
 class SlipError extends Error {
   code: string;
   httpStatus?: number;
-  constructor(code: string, httpStatus?: number) {
+  /** EasySlip's error.message (sanitised before logging). */
+  apiMessage?: string;
+  constructor(code: string, httpStatus?: number, apiMessage?: string) {
     super(code);
     this.code = code;
     this.httpStatus = httpStatus;
+    this.apiMessage = apiMessage;
   }
 }
 
@@ -110,23 +119,20 @@ function sniffImageType(buf: Buffer): { mime: string; ext: string } {
   return { mime: "image/jpeg", ext: "jpg" };
 }
 
-async function verifyWithEasySlip(image: Buffer, apiKey: string, timeoutMs: number): Promise<EasySlipSuccess["data"]> {
-  const { mime, ext } = sniffImageType(image);
-  const form = new FormData();
-  form.append("image", new Blob([new Uint8Array(image)], { type: mime }), `slip.${ext}`);
-  form.append("checkDuplicate", "true");
+async function postEasySlip(
+  body: FormData | string,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<EasySlipSuccess["data"]> {
+  const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };
+  if (typeof body === "string") headers["Content-Type"] = "application/json";
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
-    res = await fetch(EASYSLIP_VERIFY_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: form,
-      signal: controller.signal,
-    });
-  } catch (err) {
+    res = await fetch(EASYSLIP_VERIFY_URL, { method: "POST", headers, body, signal: controller.signal });
+  } catch {
     throw new SlipError(controller.signal.aborted ? "TIMEOUT" : "NETWORK_ERROR");
   } finally {
     clearTimeout(timer);
@@ -139,8 +145,35 @@ async function verifyWithEasySlip(image: Buffer, apiKey: string, timeoutMs: numb
     // non-JSON body
   }
   if (!json) throw new SlipError("INVALID_RESPONSE", res.status);
-  if (!json.success) throw new SlipError(json.error?.code ?? "UNKNOWN_ERROR", res.status);
+  if (!json.success) throw new SlipError(json.error?.code ?? "UNKNOWN_ERROR", res.status, json.error?.message);
   return json.data;
+}
+
+/** Fast path: the QR text read on our side. */
+function verifyPayload(payload: string, apiKey: string, timeoutMs: number) {
+  return postEasySlip(JSON.stringify({ payload, checkDuplicate: true }), apiKey, timeoutMs);
+}
+
+/** Fallback: upload the whole image (multipart) and let EasySlip find the QR. */
+function verifyImage(image: Buffer, apiKey: string, timeoutMs: number) {
+  const { mime, ext } = sniffImageType(image);
+  const form = new FormData();
+  form.append("image", new Blob([new Uint8Array(image)], { type: mime }), `slip.${ext}`);
+  form.append("checkDuplicate", "true");
+  return postEasySlip(form, apiKey, timeoutMs);
+}
+
+/** Errors where uploading the image after a failed payload verify cannot help. */
+function isFinalPayloadError(code: string): boolean {
+  return code === "TIMEOUT" || code === "SLIP_PENDING" || /QUOTA|UNAUTHORI|FORBIDDEN|API_KEY|PERMISSION|LIMIT|EXPIRED/i.test(code);
+}
+
+/** EasySlip's message for logs: QR text and long digit runs (account / reference numbers) removed. */
+function safeApiMessage(message: string | undefined, payload: string | null): string | undefined {
+  if (!message) return undefined;
+  let m = message;
+  if (payload) m = m.split(payload).join("[qr]");
+  return m.replace(/\d{6,}/g, "[n]").slice(0, 200);
 }
 
 // ---- Receiver check ----
@@ -319,19 +352,60 @@ async function checkSlipInner(
     return SLIP_REPLY.error;
   }
 
+  // Diagnostics for SLIP_RESULT / SLIP_ERROR (never the QR text, names or account numbers).
+  const diag: {
+    method?: "payload" | "image";
+    qrDecodeMs?: number;
+    qrAttempt?: string | null;
+    imageBytes?: number;
+    contentType?: string;
+    payloadErrorCode?: string;
+  } = {};
+  let qrPayload: string | null = null;
+  const remaining = () => SLIP_TOTAL_BUDGET_MS - elapsed();
+
   try {
     if (contentProviderType !== "line") throw new SlipError("UNSUPPORTED_CONTENT_PROVIDER");
 
     const image = await withTimeout(
       getBlobClient().getMessageContent(messageId).then(readImage),
-      SLIP_DOWNLOAD_TIMEOUT_MS,
+      Math.min(SLIP_DOWNLOAD_TIMEOUT_MS, remaining()),
       "LINE_DOWNLOAD_TIMEOUT",
     );
+    diag.imageBytes = image.length;
+    diag.contentType = sniffImageType(image).mime;
 
-    // EasySlip gets up to 7s, but never past the overall budget.
-    const verifyTimeout = Math.min(SLIP_VERIFY_TIMEOUT_MS, SLIP_TOTAL_BUDGET_MS - elapsed());
-    if (verifyTimeout <= 0) throw new SlipError("TIMEOUT");
-    const data = await verifyWithEasySlip(image, apiKey, verifyTimeout);
+    // 1) Read the QR ourselves: verifying the payload is much faster than uploading the image.
+    //    Leave at least the image-fallback time for EasySlip.
+    const qr = await decodeQr(image, Math.max(0, Math.min(SLIP_QR_DECODE_BUDGET_MS, remaining() - SLIP_MIN_IMAGE_FALLBACK_MS)));
+    diag.qrDecodeMs = qr.ms;
+    diag.qrAttempt = qr.attempt;
+    qrPayload = qr.payload;
+
+    // EasySlip gets up to 7s per call, but never past the overall budget.
+    const verifyTimeout = () => {
+      const ms = Math.min(SLIP_VERIFY_TIMEOUT_MS, remaining());
+      if (ms <= 0) throw new SlipError("TIMEOUT");
+      return ms;
+    };
+
+    let data: EasySlipSuccess["data"];
+    if (qrPayload) {
+      diag.method = "payload";
+      try {
+        data = await verifyPayload(qrPayload, apiKey, verifyTimeout());
+      } catch (err) {
+        // 2) Payload rejected (e.g. not a slip QR): try the image upload if there is time left.
+        const code = err instanceof SlipError ? err.code : "UNEXPECTED_ERROR";
+        if (isFinalPayloadError(code) || remaining() < SLIP_MIN_IMAGE_FALLBACK_MS) throw err;
+        diag.payloadErrorCode = code;
+        diag.method = "image";
+        data = await verifyImage(image, apiKey, verifyTimeout());
+      }
+    } else {
+      diag.method = "image";
+      data = await verifyImage(image, apiKey, verifyTimeout());
+    }
 
     const receiverCheck = data.isDuplicate ? undefined : checkReceiver(data.rawSlip.receiver);
     const receiverMatched = receiverCheck?.matched;
@@ -343,6 +417,7 @@ async function checkSlipInner(
       receiverMatched,
       matchedBy: receiverCheck?.matchedBy,
       matchedIndex: receiverCheck?.matchedIndex,
+      ...diag,
       sourceType,
       elapsedMs: elapsed(),
     });
@@ -377,12 +452,24 @@ async function checkSlipInner(
   } catch (err) {
     const code = err instanceof SlipError ? err.code : "UNEXPECTED_ERROR";
     const httpStatus = err instanceof SlipError ? err.httpStatus : (err as { status?: number })?.status;
-    console.error("SLIP_ERROR", { code, httpStatus, sourceType, elapsedMs: elapsed() });
+    console.error("SLIP_ERROR", {
+      code,
+      httpStatus,
+      easyslipMessage: err instanceof SlipError ? safeApiMessage(err.apiMessage, qrPayload) : undefined,
+      ...diag,
+      sourceType,
+      elapsedMs: elapsed(),
+    });
 
     switch (code) {
       case "IMAGE_TOO_LARGE":
       case "IMAGE_SIZE_TOO_LARGE":
         return SLIP_REPLY.tooLarge;
+      case "VALIDATION_ERROR":
+        // Payload and/or image were both tried and rejected.
+        return SLIP_REPLY.validation;
+      case "LINE_DOWNLOAD_TIMEOUT":
+        return SLIP_REPLY.resend;
       case "SLIP_NOT_FOUND":
         // A normal photo in a group: stay silent so the group isn't spammed.
         return inGroup ? null : SLIP_REPLY.notFound;

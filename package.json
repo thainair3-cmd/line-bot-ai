@@ -10,20 +10,24 @@
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.ts"
   },
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20.9"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
     "@line/bot-sdk": "^9.0.0",
     "@upstash/redis": "^1.41.1",
+    "jsqr": "^1.4.0",
     "next": "^14.2.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "qrcode": "^1.5.4",
     "typescript": "^5.4.0"
   }
 }
