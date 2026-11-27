@@ -1,5 +1,6 @@
 // 1:1 chat: conversation memory + order cart. Group chats do not use this module.
-import { askGeminiChat } from "./gemini";
+import { askGeminiChat, type ChatAction } from "./gemini";
+import { ruleBasedAction } from "./order-parse";
 import { getFaq } from "./sheet";
 import { getProducts } from "./products";
 import { appendHistory, formatHistory, loadCart, loadHistory, saveCart } from "./memory";
@@ -10,6 +11,7 @@ import {
   choosePending,
   emptyCart,
   formatPendingQuestion,
+  formatPriceReply,
   formatSummary,
   parseChoice,
   parseRemoveLines,
@@ -19,7 +21,7 @@ import {
   type CartResult,
 } from "./cart-ops";
 import { formatQuantity } from "./pricing";
-import { CHAT_GEMINI_DEADLINE_MS, LINE_TEXT_MAX_LENGTH } from "./constants";
+import { CHAT_GEMINI_DEADLINE_MS, DEFAULT_REPLY, LINE_TEXT_MAX_LENGTH } from "./constants";
 
 const PRODUCTS_UNAVAILABLE =
   "ขออภัยค่ะ ตอนนี้ระบบรายการสินค้าขัดข้องชั่วคราว เดี๋ยวแอดมินช่วยทำใบเสนอราคาให้นะคะ 🙏";
@@ -64,7 +66,25 @@ export async function handleChat(userId: string, text: string): Promise<{ messag
     alwaysShowSummary = true;
   } else {
     const budgetMs = CHAT_GEMINI_DEADLINE_MS - (Date.now() - startedAt);
-    const action = await askGeminiChat(faq ?? "(ไม่มีข้อมูล)", formatHistory(history), formatCartForPrompt(cart), text, budgetMs);
+    let action: ChatAction | null = await askGeminiChat(
+      faq ?? "(ไม่มีข้อมูล)",
+      formatHistory(history),
+      formatCartForPrompt(cart),
+      text,
+      budgetMs,
+    );
+
+    // Gemini failed, returned unparseable output, or handed over to staff: if the message names
+    // products we can match (with quantities, or a price question), handle it without AI.
+    if (!action || (action.action === "answer" && action.reply === DEFAULT_REPLY)) {
+      const products = await productsPromise;
+      const rule = products ? ruleBasedAction(text, products) : null;
+      if (rule) {
+        console.log("INTENT", { source: "rules", action: rule.action, itemCount: rule.items.length, parseOk: true });
+        action = rule;
+      }
+    }
+    action ??= { action: "answer", reply: DEFAULT_REPLY };
 
     if (action.action === "answer") {
       messages = [action.reply];
@@ -80,6 +100,11 @@ export async function handleChat(userId: string, text: string): Promise<{ messag
         action.items.flatMap((i) => (!i.line && i.query ? [i.query] : [])),
       );
       alwaysShowSummary = true;
+    } else if (action.action === "price") {
+      // Unit price only; nothing is added to the cart.
+      const { items } = action;
+      const products = await productsPromise;
+      messages = [products ? formatPriceReply(items, products).slice(0, LINE_TEXT_MAX_LENGTH) : PRODUCTS_UNAVAILABLE];
     } else if (action.action === "add" || action.action === "set") {
       const { action: mode, items } = action;
       const products = await productsPromise;

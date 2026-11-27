@@ -188,6 +188,27 @@ export function formatPendingQuestion(cart: Cart): string | null {
   return [`“${p.query}” มีหลายรายการค่ะ รบกวนพิมพ์หมายเลขที่ต้องการนะคะ`, ...options].join("\n");
 }
 
+/**
+ * Unit prices from the product sheet for "how much is X?" (no quantity, nothing added to the cart).
+ */
+export function formatPriceReply(items: OrderItem[], products: Product[]): string {
+  const parts = items
+    .filter((i) => i.query?.trim())
+    .map((i) => {
+      const m = matchProducts(i.query, products);
+      const price = (p: Product) => `${formatBaht(p.price)} บาท${p.unit ? `/${p.unit}` : ""}`;
+      if (m.kind === "one") return `${m.product.name}\nราคา ${price(m.product)} (ยังไม่รวม VAT) ค่ะ`;
+      if (m.kind === "many") {
+        const shown = m.products.slice(0, MAX_OPTIONS_SHOWN).map((p, k) => `${k + 1}) ${p.name} ${price(p)}`);
+        const more = m.products.length > MAX_OPTIONS_SHOWN ? [`และอีก ${m.products.length - MAX_OPTIONS_SHOWN} รายการ รบกวนระบุให้ชัดขึ้นนะคะ`] : [];
+        return [`“${i.query}” มีหลายรายการค่ะ (ราคายังไม่รวม VAT)`, ...shown, ...more].join("\n");
+      }
+      return notFound(i.query);
+    });
+  if (parts.length === 0) return notFound("");
+  return [...parts, "ถ้าต้องการใบเสนอราคา พิมพ์สินค้าพร้อมจำนวนได้เลย เช่น \"L 1/2 10 เส้น\" นะคะ"].join("\n\n");
+}
+
 /** Shortcuts handled without Gemini. */
 export const CLEAR_RE = /^\s*(ล้างตะกร้า|ล้างรายการ|เคลียร์ตะกร้า|ยกเลิกทั้งหมด|ยกเลิกรายการทั้งหมด)/;
 const REMOVE_RE = /^\s*ลบ\s*(?:รายการ)?\s*(?:ที่)?\s*((?:\d+\s*(?:,|และ|\s)\s*)*\d+)\s*(?:ค่ะ|คะ|ครับ|นะ)?\s*$/;
