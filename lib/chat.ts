@@ -1,9 +1,32 @@
 // 1:1 chat: conversation memory + order cart. Group chats do not use this module.
-import { askGeminiChat, type ChatAction } from "./gemini";
+import { askCustomerInfo, askGeminiChat, type ChatAction } from "./gemini";
 import { ruleBasedAction } from "./order-parse";
 import { getFaq } from "./sheet";
 import { getProducts } from "./products";
-import { appendHistory, formatHistory, loadCart, loadHistory, saveCart } from "./memory";
+import {
+  appendHistory,
+  formatHistory,
+  loadCart,
+  loadCheckout,
+  loadCustomer,
+  loadHistory,
+  saveCart,
+  saveCheckout,
+  saveCustomer,
+  saveQuoteRequest,
+} from "./memory";
+import {
+  continueCheckout,
+  extractCustomerRules,
+  isEditCustomer,
+  isQuoteTrigger,
+  needsExtraction,
+  startCheckout,
+  startEditCustomer,
+  type CheckoutState,
+  type CheckoutStep,
+  type Customer,
+} from "./checkout";
 import {
   CLEAR_RE,
   addItems,
@@ -39,16 +62,96 @@ function cartReply(r: CartResult, alwaysShowSummary: boolean): string[] {
   return messages.map((m) => m.slice(0, LINE_TEXT_MAX_LENGTH));
 }
 
+const QUOTE_SAVE_FAILED =
+  'ขออภัยค่ะ ระบบบันทึกคำขอขัดข้องชั่วคราว รบกวนพิมพ์ "ยืนยัน" อีกครั้งนะคะ 🙏';
+
+type ChatResult = { messages: string[]; save: () => Promise<void> };
+
+/**
+ * Quote checkout (stage 2). Returns null when the message is not part of it, so the normal
+ * chat flow handles it (FAQ, orders...) and the cart and checkout state stay as they are.
+ */
+async function handleCheckout(
+  userId: string,
+  text: string,
+  cart: Cart,
+  state: CheckoutState | null,
+  customer: Customer | null,
+  deadline: () => number,
+): Promise<{ messages: string[]; afterReply: () => Promise<void> } | null> {
+  let step: CheckoutStep | null = null;
+  if (isEditCustomer(text)) {
+    step = startEditCustomer(customer);
+  } else if (state && !(state.stage === "collecting" && isQuoteTrigger(text))) {
+    let extracted = {};
+    if (needsExtraction(state, text)) {
+      // Gemini reads the details; if it fails, the rule-based reader takes over.
+      extracted = (await askCustomerInfo(text, state.draft, deadline())) ?? extractCustomerRules(text);
+    }
+    step = continueCheckout(state, text, extracted, { cart, customer, userId });
+  } else if (isQuoteTrigger(text)) {
+    step = startCheckout(cart, customer);
+  }
+  if (!step || step.passThrough) return null;
+
+  // The quote request must be stored before we tell the customer it was received.
+  if (step.quote) {
+    if (!(await saveQuoteRequest(step.quote))) return { messages: [QUOTE_SAVE_FAILED], afterReply: async () => {} };
+    console.log("QUOTE_REQUESTED", {
+      requestId: step.quote.requestId,
+      itemCount: step.quote.items.length,
+      subtotal: step.quote.subtotal,
+    });
+  }
+  if (step.saveCustomer && (await saveCustomer(userId, step.saveCustomer.customer))) {
+    console.log("CUSTOMER_SAVED", { isNew: step.saveCustomer.isNew });
+  }
+
+  const finalStep = step;
+  return {
+    messages: step.messages.map((m) => m.slice(0, LINE_TEXT_MAX_LENGTH)),
+    afterReply: async () => {
+      const tasks: Promise<unknown>[] = [];
+      if (finalStep.state !== undefined) tasks.push(saveCheckout(userId, finalStep.state));
+      if (finalStep.clearCart) tasks.push(saveCart(userId, emptyCart()));
+      await Promise.all(tasks);
+    },
+  };
+}
+
 /**
  * Handles one 1:1 text message and returns the reply messages (1–2 texts).
  * Redis failures are logged as MEMORY_ERROR and the bot continues without memory/cart.
  */
-export async function handleChat(userId: string, text: string): Promise<{ messages: string[]; save: () => Promise<void> }> {
+export async function handleChat(userId: string, text: string): Promise<ChatResult> {
   const startedAt = Date.now();
+  const geminiBudget = () => CHAT_GEMINI_DEADLINE_MS - (Date.now() - startedAt);
   // Start the product fetch now so it runs alongside Gemini; it is only awaited for orders.
   const productsPromise = getProducts();
-  const [faq, history, storedCart] = await Promise.all([getFaq(), loadHistory(userId), loadCart(userId)]);
+  const [faq, history, storedCart, checkoutState, customer] = await Promise.all([
+    getFaq(),
+    loadHistory(userId),
+    loadCart(userId),
+    loadCheckout(userId),
+    loadCustomer(userId),
+  ]);
   const cart = storedCart ?? emptyCart();
+
+  const checkout = await handleCheckout(userId, text, cart, checkoutState, customer, geminiBudget);
+  if (checkout) {
+    return {
+      messages: checkout.messages,
+      save: async () => {
+        await Promise.all([
+          checkout.afterReply(),
+          appendHistory(userId, [
+            { role: "user", text },
+            { role: "bot", text: checkout.messages.join("\n") },
+          ]),
+        ]);
+      },
+    };
+  }
 
   let result: CartResult | null = null;
   let messages: string[] = [];
@@ -65,7 +168,7 @@ export async function handleChat(userId: string, text: string): Promise<{ messag
     result = removeItems(cart, removeLines, []);
     alwaysShowSummary = true;
   } else {
-    const budgetMs = CHAT_GEMINI_DEADLINE_MS - (Date.now() - startedAt);
+    const budgetMs = geminiBudget();
     let action: ChatAction | null = await askGeminiChat(
       faq ?? "(ไม่มีข้อมูล)",
       formatHistory(history),

@@ -1,5 +1,12 @@
 import { redisOp } from "./redis";
-import { CART_TTL_SECONDS, MEMORY_MAX_MESSAGES, MEMORY_MAX_TEXT_LENGTH, MEMORY_TTL_SECONDS } from "./constants";
+import {
+  CART_TTL_SECONDS,
+  CHECKOUT_TTL_SECONDS,
+  MEMORY_MAX_MESSAGES,
+  MEMORY_MAX_TEXT_LENGTH,
+  MEMORY_TTL_SECONDS,
+} from "./constants";
+import type { CheckoutState, Customer, QuoteRequest } from "./checkout";
 import type { Cart } from "./cart-ops";
 
 export type HistoryEntry = { role: "user" | "bot"; text: string };
@@ -54,3 +61,47 @@ export async function saveCart(userId: string, cart: Cart): Promise<boolean> {
   return ok === true;
 }
 
+
+// ---- Customers, checkout and quote requests (1:1 chat) ----
+
+
+const customerKey = (userId: string) => `customer:${userId}`; // no expiry: reused next time
+const checkoutKey = (userId: string) => `chat:checkout:${userId}`;
+const quoteRequestKey = (requestId: string) => `quote:request:${requestId}`; // no expiry
+export const QUOTE_PENDING_LIST = "quote:pending"; // requestIds waiting for admin approval (stage 3)
+
+export async function loadCustomer(userId: string): Promise<Customer | null> {
+  return redisOp("loadCustomer", (r) => r.get<Customer>(customerKey(userId)));
+}
+
+export async function saveCustomer(userId: string, customer: Customer): Promise<boolean> {
+  const ok = await redisOp("saveCustomer", async (r) => {
+    await r.set(customerKey(userId), customer);
+    return true;
+  });
+  return ok === true;
+}
+
+export async function loadCheckout(userId: string): Promise<CheckoutState | null> {
+  return redisOp("loadCheckout", (r) => r.get<CheckoutState>(checkoutKey(userId)));
+}
+
+/** null clears the checkout. Expires like the cart if the customer never finishes. */
+export async function saveCheckout(userId: string, state: CheckoutState | null): Promise<boolean> {
+  const key = checkoutKey(userId);
+  const ok = await redisOp("saveCheckout", async (r) => {
+    if (state) await r.set(key, state, { ex: CHECKOUT_TTL_SECONDS });
+    else await r.del(key);
+    return true;
+  });
+  return ok === true;
+}
+
+/** Stores the pending quote request and queues it for the admin. Returns false if Redis failed. */
+export async function saveQuoteRequest(req: QuoteRequest): Promise<boolean> {
+  const ok = await redisOp("saveQuoteRequest", async (r) => {
+    await r.multi().set(quoteRequestKey(req.requestId), req).lpush(QUOTE_PENDING_LIST, req.requestId).exec();
+    return true;
+  });
+  return ok === true;
+}

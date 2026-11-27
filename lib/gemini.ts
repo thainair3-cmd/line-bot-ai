@@ -336,3 +336,75 @@ export async function askGeminiChat(
   });
   return parsed;
 }
+
+// ---- Customer details for quotes (1:1 checkout) ----
+
+const CUSTOMER_SYSTEM_INSTRUCTION = `<task>
+ลูกค้ากำลังส่งข้อมูลสำหรับออกใบเสนอราคา ให้อ่าน <message> แล้วแยกข้อมูลเป็น JSON
+- isCustomerInfo: true ถ้าข้อความมีข้อมูลบริษัท/ที่อยู่/เบอร์โทร/สาขา อย่างน้อย 1 อย่าง
+  false ถ้าเป็นเรื่องอื่น (ถามคำถาม สั่งสินค้า ทักทาย) แล้วเว้นช่องอื่นไว้
+- companyName: ชื่อบริษัท/ร้าน/ชื่อผู้ซื้อ ตามที่ลูกค้าพิมพ์ ไม่รวมคำว่าสำนักงานใหญ่หรือสาขา
+- branch: "สำนักงานใหญ่" หรือ "สาขา <ชื่อหรือเลขสาขา>" ตามที่ลูกค้าระบุ
+- address: ที่อยู่ตามที่ลูกค้าพิมพ์ทั้งหมด
+- phone: เบอร์โทรตามที่ลูกค้าพิมพ์
+ใส่เฉพาะข้อมูลที่มีใน <message> เท่านั้น ห้ามเดาหรือแต่งเพิ่ม ห้ามคัดลอกจาก <current>
+<current> คือข้อมูลที่ได้มาแล้ว ใช้เพื่อเข้าใจว่าลูกค้ากำลังตอบข้อไหน (เช่นตอบแค่ "สำนักงานใหญ่ค่ะ")
+</task>
+<output_format>JSON ตาม schema เท่านั้น</output_format>`;
+
+const CUSTOMER_RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    isCustomerInfo: { type: "boolean" },
+    companyName: { type: "string" },
+    branch: { type: "string" },
+    address: { type: "string" },
+    phone: { type: "string" },
+  },
+  required: ["isCustomerInfo"],
+};
+
+export type ExtractedCustomer = {
+  companyName?: string;
+  branch?: string;
+  address?: string;
+  phone?: string;
+};
+
+/**
+ * Reads company name / branch / address / phone from a checkout message.
+ * Returns {} when the message is about something else, or null if Gemini failed / output was
+ * not valid JSON (caller falls back to the rule-based extractor). Never logs the values.
+ */
+export async function askCustomerInfo(
+  message: string,
+  current: ExtractedCustomer,
+  budgetMs: number,
+): Promise<ExtractedCustomer | null> {
+  const contents =
+    `<current>\n${JSON.stringify(current)}\n</current>\n` + `<message>\n${message}\n</message>`;
+  const text = await generate(
+    contents,
+    { systemInstruction: CUSTOMER_SYSTEM_INSTRUCTION, json: CUSTOMER_RESPONSE_SCHEMA },
+    Math.min(GEMINI_TIMEOUT_MS, budgetMs),
+  );
+  if (!text) return null;
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, ""));
+  } catch {
+    console.error("CUSTOMER_PARSE_ERROR", { length: text.length });
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
+  const pick = (k: string) => (typeof data[k] === "string" ? (data[k] as string).trim().slice(0, 300) : "");
+  const out: ExtractedCustomer = {};
+  if (data.isCustomerInfo === true) {
+    for (const k of ["companyName", "branch", "address", "phone"] as const) {
+      const v = pick(k);
+      if (v) out[k] = v;
+    }
+  }
+  console.log("CUSTOMER_EXTRACT", { isCustomerInfo: data.isCustomerInfo === true, fields: Object.keys(out) });
+  return out;
+}

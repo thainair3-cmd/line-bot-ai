@@ -52,6 +52,8 @@ export const MEMORY_MAX_MESSAGES = 10; // last 10 messages (customer + bot) per 
 export const MEMORY_MAX_TEXT_LENGTH = 500; // each stored message is cut to this length
 export const MEMORY_TTL_SECONDS = 24 * 60 * 60;
 export const CART_TTL_SECONDS = 3 * 24 * 60 * 60;
-// 1:1 chat: Gemini must finish by this point (measured from the start of the event) so the reply
-// and the Redis save still fit in Vercel's 10s limit.
-export const CHAT_GEMINI_DEADLINE_MS = 8_000;
+// 1:1 chat: all Gemini calls for one message must finish by this point (measured from the start
+// of the event), so the reply and the Redis save still fit in the webhook's 30s maxDuration.
+// A checkout message that turns out to be a normal question may need two calls.
+export const CHAT_GEMINI_DEADLINE_MS = 20_000;
+export const CHECKOUT_TTL_SECONDS = 3 * 24 * 60 * 60; // unfinished quote checkout
