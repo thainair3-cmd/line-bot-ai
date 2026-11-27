@@ -65,7 +65,7 @@ const HEADER_ALIASES = {
 } as const;
 
 /** Lowercase and drop all whitespace (and any BOM) so " Question " / "คำ ถาม" still match. */
-function normalizeHeader(h: string): string {
+export function normalizeHeader(h: string): string {
   return h.replace(/﻿/g, "").replace(/\s+/g, "").toLowerCase();
 }
 

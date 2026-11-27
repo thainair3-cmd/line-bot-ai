@@ -34,3 +34,17 @@ export const SHEET_FETCH_TIMEOUT_MS = 1_000; // on timeout, getFaq() falls back 
 
 // LINE
 export const LINE_TEXT_MAX_LENGTH = 5_000;
+
+// Products sheet ("สินค้า")
+export const PRODUCTS_CACHE_TTL_MS = 5 * 60_000;
+export const PRODUCTS_FETCH_TIMEOUT_MS = 1_500; // on timeout, getProducts() falls back to the stale cache
+
+// Memory + cart (Upstash Redis, 1:1 chat only)
+export const REDIS_TIMEOUT_MS = 800; // per request; on failure the bot continues without memory
+export const MEMORY_MAX_MESSAGES = 10; // last 10 messages (customer + bot) per user
+export const MEMORY_MAX_TEXT_LENGTH = 500; // each stored message is cut to this length
+export const MEMORY_TTL_SECONDS = 24 * 60 * 60;
+export const CART_TTL_SECONDS = 3 * 24 * 60 * 60;
+// 1:1 chat: Gemini must finish by this point (measured from the start of the event) so the reply
+// and the Redis save still fit in Vercel's 10s limit.
+export const CHAT_GEMINI_DEADLINE_MS = 8_000;

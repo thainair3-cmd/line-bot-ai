@@ -2,6 +2,7 @@ import { HTTPFetchError, messagingApi, validateSignature, type WebhookEvent } fr
 import { askGemini } from "@/lib/gemini";
 import { getFaq } from "@/lib/sheet";
 import { checkSlip, type SlipReply } from "@/lib/slip";
+import { handleChat } from "@/lib/chat";
 import { DEFAULT_REPLY, GROUP_JOIN_REPLY, GROUP_TRIGGER, UNSUPPORTED_MESSAGE_REPLY } from "@/lib/constants";
 
 export const runtime = "nodejs";
@@ -105,13 +106,24 @@ async function handleEvent(event: WebhookEvent): Promise<void> {
     return;
   }
 
-  // 1:1 chat (unchanged).
+  // 1:1 chat.
   if (event.message.type !== "text") {
     await reply(event.replyToken, UNSUPPORTED_MESSAGE_REPLY);
     return;
   }
 
-  await answerWithGemini(event.replyToken, event.message.text);
+  const userId = event.source.type === "user" ? event.source.userId : undefined;
+  if (!userId) {
+    await answerWithGemini(event.replyToken, event.message.text);
+    return;
+  }
+  // Memory + order cart (Redis). Reply first, then save, all before the webhook returns 200.
+  const chat = await handleChat(userId, event.message.text);
+  await replyMessages(
+    event.replyToken,
+    chat.messages.map((text): messagingApi.Message => ({ type: "text", text })),
+  );
+  await chat.save();
 }
 
 export async function POST(req: Request): Promise<Response> {
