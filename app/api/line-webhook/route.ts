@@ -6,7 +6,7 @@ import { handleChat } from "@/lib/chat";
 import { DEFAULT_REPLY, GROUP_JOIN_REPLY, GROUP_TRIGGER, UNSUPPORTED_MESSAGE_REPLY } from "@/lib/constants";
 
 export const runtime = "nodejs";
-export const maxDuration = 10;
+export const maxDuration = 30;
 
 let lineClient: messagingApi.MessagingApiClient | null = null;
 function getLineClient(): messagingApi.MessagingApiClient {

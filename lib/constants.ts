@@ -10,14 +10,17 @@ export const GROUP_JOIN_REPLY =
 // In a group, text is only answered when it starts with this name (an optional leading "@" is allowed).
 export const GROUP_TRIGGER = "น้องแอดมิน";
 
-// Slip verification (EasySlip). The whole slip flow must finish within SLIP_TOTAL_BUDGET_MS.
-export const SLIP_TOTAL_BUDGET_MS = 9_000;
+// Slip verification (EasySlip). The whole slip flow must finish within SLIP_TOTAL_BUDGET_MS
+// (the webhook's maxDuration is 30s; the rest is left for the LINE reply).
+export const SLIP_TOTAL_BUDGET_MS = 26_000;
 export const SLIP_DOWNLOAD_TIMEOUT_MS = 4_000;
-export const SLIP_VERIFY_TIMEOUT_MS = 7_000;
 // QR is decoded on the server first (fast JSON "payload" verify); this caps all decode attempts.
 export const SLIP_QR_DECODE_BUDGET_MS = 1_500;
-// After a failed payload verify, fall back to uploading the image only if this much time is left.
-export const SLIP_MIN_IMAGE_FALLBACK_MS = 2_500;
+// Per EasySlip call, separate from the QR decode time (195KB uploads have taken over 8s).
+export const SLIP_VERIFY_TIMEOUT_MS = 12_000;
+// After a failed payload verify, upload the image only if at least this much time is left,
+// so the second call still gets a full 10s wait without overrunning the budget.
+export const SLIP_MIN_IMAGE_FALLBACK_MS = 10_000;
 export const SLIP_MAX_IMAGE_BYTES = 4 * 1024 * 1024; // EasySlip limit: 4 MB
 
 // Gemini
