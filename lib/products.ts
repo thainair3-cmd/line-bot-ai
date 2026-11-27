@@ -1,4 +1,4 @@
-import { normalizeHeader, parseCsv } from "./sheet";
+import { normalizeHeader, parseCsv } from "./csv";
 import { parsePrice } from "./pricing";
 import type { Product } from "./match";
 import { PRODUCTS_CACHE_TTL_MS, PRODUCTS_FETCH_TIMEOUT_MS } from "./constants";
