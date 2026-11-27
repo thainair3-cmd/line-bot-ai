@@ -110,3 +110,51 @@ test("ราคาจาก CSV", () => {
   assert.equal(P.find((p) => p.code === "CO-003")!.price, 2519.3);
   assert.equal(P.find((p) => p.code === "AF-AFSR12APP")!.price, 10140);
 });
+
+// Cases that failed when testing all 636 real products (fixed): a few names copied from the sheet.
+const R: Product[] = [
+  ["FT-006", 'ข้องอ 90° ทองแดง ขนาด 7/8"'],
+  ["FT-106", 'ข้องอ 90° ทองแดง รัศมียาว ขนาด 7/8"'],
+  ["FT-048", 'สามทาง ทองแดง ขนาด 1/2"'],
+  ["FT-114", 'สามทางลด ทองแดง ขนาด 1/2" x 1/2" x 1/4"'],
+  ["FT-115", 'สามทางลด ทองแดง ขนาด 1/2" x 1/2" x 3/8"'],
+  ["FT-062", 'ข้อต่อเกลียวนอก ทองแดง ขนาด 3/8" x 1/2"'],
+  ["FT-063", 'ข้อต่อเกลียวนอก ทองแดง ขนาด 1/2" x 3/8"'],
+  ["FT-064", 'ข้อต่อเกลียวนอก ทองแดง ขนาด 1/2" x 1/2"'],
+  ["AF-1410", 'AEROFLEX:ฉนวนยางท่อ 1410 (หนา 1/4" ท่อ 1" ยาว 1.83ม.)'],
+  ["AF-1210", 'AEROFLEX:ฉนวนยางท่อ 1210 (หนา 1/2" ท่อ 1" ยาว 1.83ม.)'],
+  ["AF-12200", 'AEROFLEX:ฉนวนยางท่อ 12200 (หนา 1/2" ท่อ 2" ยาว 1.83ม.)'],
+  ["AF-2058", 'AEROFLEX:ฉนวนยางท่อ 2058 (หนา 2" ท่อ 5/8" ยาว 1.83ม.)'],
+  ["AF-M63022PP", 'AEROFLEX:ฉนวนยางท่อ M63022PP (หนา 2-1/2" ท่อ 7/8" ยาว 2ม.)'],
+].map(([code, name]) => ({ code, name, unit: "ตัว", price: 1 }));
+
+function matchR(q: string): string {
+  const m = matchProducts(q, R);
+  if (m.kind === "one") return m.product.code;
+  return m.kind === "many" ? `many:${m.products.map((p) => p.code).join(",")}` : "none";
+}
+
+test("ชื่อเต็มทุกตัวต้องได้ตัวเอง (ชุดที่เคยไม่ผ่าน)", () => {
+  for (const p of R) assert.equal(matchR(p.name), p.code, p.name);
+});
+
+test("ข้อต่อ: เลือกตัวที่ไม่มีขนาดเกิน / ลำดับขนาดตรง / คำเกินน้อยสุด", () => {
+  assert.equal(matchR("สามทาง 1/2"), "FT-048");
+  assert.equal(matchR("สามทางลด 1/2 x 1/2 x 1/4"), "FT-114");
+  assert.equal(matchR("สามทางลด 1/2"), "many:FT-114,FT-115");
+  assert.equal(matchR("ข้องอ 90 7/8"), "FT-006");
+  assert.equal(matchR("ข้องอ 7/8 รัศมียาว"), "FT-106");
+  assert.equal(matchR("เกลียวนอก 3/8 x 1/2"), "FT-062");
+  assert.equal(matchR("เกลียวนอก 1/2 x 3/8"), "FT-063");
+  assert.equal(matchR("เกลียวนอก 4 หุน x 4 หุน"), "FT-064");
+});
+
+test("AEROFLEX ขนาดเต็มนิ้วและรหัสเมตริก: เทียบหนา/ท่อตามลำดับ", () => {
+  assert.equal(matchR("ยาง 1/4 ท่อ 1 นิ้ว"), "AF-1410");
+  assert.equal(matchR("ยาง 4 หุน ท่อ 1\""), "AF-1210");
+  assert.equal(matchR("หนา 1/2 ท่อ 2"), "AF-12200");
+  assert.equal(matchR("ยาง 2 นิ้ว ท่อ 5 หุน"), "AF-2058");
+  assert.equal(matchR("ยาง 2-1/2 ท่อ 7/8"), "AF-M63022PP");
+  assert.equal(matchR("ยาง 1 ท่อ 1/4"), "none"); // reversed AF-1410
+  assert.equal(matchR("M63022PP"), "AF-M63022PP");
+});

@@ -86,18 +86,21 @@ const AF_THICK_RE = new RegExp(String.raw`(?:หนา|ยาง|ฉนวน)\s
 const AF_PIPE_RE = new RegExp(String.raw`ท่อ\s*` + SIZE);
 
 /**
- * AEROFLEX tube code from "ยาง/หนา X ท่อ Y" (either order): thickness digits + pipe digits,
- * e.g. ยาง 3/4 ท่อ 3/8 -> "3438", หนา 1/2 ท่อ 1-3/8 -> "12138" (the code in the sheet name).
- * Returns the text with both sizes replaced by the code, or null if the pattern is not there.
- * Only applied to customer queries.
+ * AEROFLEX "ยาง/หนา X ท่อ Y" (either order) -> key "X|Y" (thickness|pipe).
+ * The same key is read from each sheet name ("... (หนา 1/2" ท่อ 1-3/8" ยาว 1.83ม.)"), so the
+ * order matters (หนา 3/4 ท่อ 1-1/4 is not หนา 1-1/4 ท่อ 3/4) and it works for every code style
+ * (12138, 1410, M63022PP). Returns the key and the text with both sizes removed, or null.
  */
-function withAeroflexCode(t: string): string | null {
+function aeroflexKey(t: string): { key: string; rest: string } | null {
   const thick = AF_THICK_RE.exec(t);
   const pipe = AF_PIPE_RE.exec(t);
   if (!thick || !pipe) return null;
-  const digits = (size: string) => size.replace(/[+/]/g, "");
-  const code = digits(thick[1]) + digits(pipe[1]);
-  return `${t.replace(thick[0], " ").replace(pipe[0], " ")} ${code}`;
+  // Cut both matches out by position (a text replace could hit "ท่อ 1" inside "ท่อ 1410").
+  let rest = t;
+  for (const m of [thick, pipe].sort((a, b) => b.index - a.index)) {
+    rest = `${rest.slice(0, m.index)} ${rest.slice(m.index + m[0].length)}`;
+  }
+  return { key: `${thick[1]}|${pipe[1]}`, rest };
 }
 
 /**
@@ -111,7 +114,18 @@ function isHard(tok: string): boolean {
 
 const compact = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[\s\-_./:]/g, "");
 
-type Indexed = { product: Product; tokens: Set<string>; text: string; code: string };
+type Indexed = {
+  product: Product;
+  tokens: Set<string>; // code + name tokens
+  text: string;
+  code: string;
+  nameHard: string[]; // hard tokens of the name only, with repeats (1/2 x 1/2 x 1/4 -> three)
+  nameSoft: string[];
+  sizes: string[]; // inch sizes in name order ("3/8 x 1/2" -> ["3/8", "1/2"])
+  afKey?: string; // AEROFLEX tube "thickness|pipe"
+};
+
+const isSize = (tok: string) => tok.includes("/") || /^\d\+/.test(tok);
 
 const indexCache = new WeakMap<Product[], Indexed[]>();
 function indexOf(products: Product[]): Indexed[] {
@@ -119,17 +133,53 @@ function indexOf(products: Product[]): Indexed[] {
   if (!idx) {
     idx = products.map((p) => {
       const tokens = tokenize(`${p.code} ${p.name}`);
-      return { product: p, tokens: new Set(tokens), text: tokens.join(" "), code: compact(p.code) };
+      const name = tokenize(p.name);
+      return {
+        product: p,
+        tokens: new Set(tokens),
+        text: tokens.join(" "),
+        code: compact(p.code),
+        nameHard: name.filter(isHard),
+        nameSoft: name.filter((t) => !isHard(t)),
+        sizes: name.filter(isSize),
+        afKey: aeroflexKey(normalizeText(p.name))?.key,
+      };
     });
     indexCache.set(products, idx);
   }
   return idx;
 }
 
-/** Exact token, or a bare decimal thickness ("0.7") against "0.7mm". */
+/** Same token, or a bare decimal thickness ("0.7") against "0.7mm". */
+function sameHard(query: string, product: string): boolean {
+  return query === product || (/^\d+\.\d+$/.test(query) && product === `${query}mm`);
+}
+
 function hardTokenMatches(h: string, i: Indexed): boolean {
-  if (i.tokens.has(h)) return true;
-  return /^\d+\.\d+$/.test(h) && i.tokens.has(`${h}mm`);
+  return i.tokens.has(h) || (/^\d+\.\d+$/.test(h) && i.tokens.has(`${h}mm`));
+}
+
+/** Sizes/numbers in the product name that the customer did not type (counting repeats). */
+function extraHard(hard: string[], i: Indexed): number {
+  const left = [...hard];
+  let extra = 0;
+  for (const p of i.nameHard) {
+    const k = left.findIndex((h) => sameHard(h, p));
+    if (k >= 0) left.splice(k, 1);
+    else extra++;
+  }
+  return extra;
+}
+
+/** Words in the product name not covered by the customer's words (e.g. "รัศมียาว"). */
+function extraSoft(soft: string[], i: Indexed): number {
+  return i.nameSoft.filter((p) => !soft.some((q) => p.includes(q) || q.includes(p))).length;
+}
+
+/** Keeps the items with the lowest value (all of them if they tie). */
+function narrow<T>(items: T[], value: (t: T) => number): T[] {
+  const min = Math.min(...items.map(value));
+  return items.filter((t) => value(t) === min);
 }
 
 export function matchProducts(query: string, products: Product[]): MatchResult {
@@ -143,18 +193,36 @@ export function matchProducts(query: string, products: Product[]): MatchResult {
   }
 
   const normalized = normalizeText(query);
-  const tokens = splitTokens(withAeroflexCode(normalized) ?? normalized);
-  if (tokens.length === 0) return { kind: "none" };
+  // "ยาง X ท่อ Y": compare thickness and pipe size with each AEROFLEX name, in that order.
+  const af = aeroflexKey(normalized);
+  const tokens = splitTokens(af ? af.rest : normalized);
+  if (tokens.length === 0 && !af) return { kind: "none" };
   const hard = tokens.filter(isHard);
   const soft = tokens.filter((t) => !isHard(t));
+  const typedSizes = splitTokens(normalized).filter(isSize).join(" ");
 
   const scored = index
+    .filter((i) => !af || i.afKey === af.key)
     .filter((i) => hard.every((h) => hardTokenMatches(h, i)))
     .map((i) => ({ i, score: soft.filter((s) => i.text.includes(s)).length }))
-    .filter((s) => hard.length > 0 || s.score > 0);
+    .filter((s) => af || hard.length > 0 || s.score > 0);
 
   if (scored.length === 0) return { kind: "none" };
   const best = Math.max(...scored.map((s) => s.score));
-  const top = scored.filter((s) => s.score === best).map((s) => s.i.product);
-  return top.length === 1 ? { kind: "one", product: top[0] } : { kind: "many", products: top };
+  let top = scored.filter((s) => s.score === best).map((s) => s.i);
+
+  // Tie-break: prefer products with no sizes beyond what was typed ("สามทาง 1/2" -> the plain tee,
+  // not "สามทางลด 1/2 x 1/2 x 1/4"), then sizes in the typed order ("เกลียวนอก 3/8 x 1/2" is not
+  // "1/2 x 3/8"), then the fewest extra words ("ข้องอ 90 7/8" -> the standard elbow, not
+  // "รัศมียาว"). Only when some product has no extra sizes, so "ท่อ 1/2" still asks.
+  if (top.length > 1) {
+    const exact = top.filter((i) => extraHard(hard, i) === 0);
+    if (exact.length > 0) {
+      top = narrow(exact, (i) => (i.sizes.join(" ") === typedSizes ? 0 : 1));
+      top = narrow(top, (i) => extraSoft(soft, i));
+    }
+  }
+  return top.length === 1
+    ? { kind: "one", product: top[0].product }
+    : { kind: "many", products: top.map((i) => i.product) };
 }
