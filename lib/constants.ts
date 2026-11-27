@@ -4,6 +4,12 @@ export const DEFAULT_REPLY =
 export const UNSUPPORTED_MESSAGE_REPLY =
   "ขออภัยค่ะ ตอนนี้น้องแอดมินรองรับเฉพาะข้อความตัวอักษรและรูปสลิปโอนเงินนะคะ 🙏";
 
+// Groups / rooms
+export const GROUP_JOIN_REPLY =
+  "สวัสดีค่ะ น้องแอดมินพร้อมช่วยตรวจสลิปโอนเงินในกลุ่มนี้แล้วค่ะ ส่งรูปสลิปเข้ามาได้เลยนะคะ 🙏";
+// In a group, text is only answered when it starts with this name (an optional leading "@" is allowed).
+export const GROUP_TRIGGER = "น้องแอดมิน";
+
 // Slip verification (EasySlip). The whole slip flow must finish within SLIP_TOTAL_BUDGET_MS.
 export const SLIP_TOTAL_BUDGET_MS = 9_000;
 export const SLIP_DOWNLOAD_TIMEOUT_MS = 1_800;

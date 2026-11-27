@@ -2,7 +2,7 @@ import { HTTPFetchError, messagingApi, validateSignature, type WebhookEvent } fr
 import { askGemini } from "@/lib/gemini";
 import { getFaq } from "@/lib/sheet";
 import { checkSlip, type SlipReply } from "@/lib/slip";
-import { DEFAULT_REPLY, UNSUPPORTED_MESSAGE_REPLY } from "@/lib/constants";
+import { DEFAULT_REPLY, GROUP_JOIN_REPLY, GROUP_TRIGGER, UNSUPPORTED_MESSAGE_REPLY } from "@/lib/constants";
 
 export const runtime = "nodejs";
 export const maxDuration = 10;
@@ -55,25 +55,63 @@ async function replySlip(replyToken: string, slip: SlipReply): Promise<void> {
   }
 }
 
+/**
+ * In a group, text is only for the bot when it starts with GROUP_TRIGGER (optionally "@น้องแอดมิน").
+ * Returns the question with the trigger removed, or null if the message is not addressed to the bot.
+ */
+function groupQuestion(text: string): string | null {
+  const t = text.trim().replace(/^@/, "");
+  if (!t.startsWith(GROUP_TRIGGER)) return null;
+  const rest = t.slice(GROUP_TRIGGER.length).replace(/^[\s,:：、]+/, "").trim();
+  // Only the name was typed: let Gemini treat it as a greeting.
+  return rest || GROUP_TRIGGER;
+}
+
+async function answerWithGemini(replyToken: string, question: string): Promise<void> {
+  const faq = await getFaq();
+  const answer = faq ? await askGemini(faq, question) : DEFAULT_REPLY;
+  await reply(replyToken, answer);
+}
+
 async function handleEvent(event: WebhookEvent): Promise<void> {
   if (event.deliveryContext?.isRedelivery) return;
-  if (event.type !== "message") return;
 
-  // Images are checked as transfer slips via EasySlip (never sent to Gemini).
-  if (event.message.type === "image") {
-    const slip = await checkSlip(event.message.id, event.message.contentProvider.type);
-    await replySlip(event.replyToken, slip);
+  const sourceType = event.source?.type ?? "unknown";
+  const inGroup = sourceType === "group" || sourceType === "room";
+
+  // Bot was invited into a group/room.
+  if (event.type === "join") {
+    console.log("EVENT", { type: "join", sourceType });
+    await reply(event.replyToken, GROUP_JOIN_REPLY);
     return;
   }
 
+  if (event.type !== "message") return;
+  console.log("EVENT", { type: "message", messageType: event.message.type, sourceType });
+
+  // Images are checked as transfer slips via EasySlip (never sent to Gemini).
+  if (event.message.type === "image") {
+    const slip = await checkSlip(event.message.id, event.message.contentProvider.type, { sourceType });
+    if (slip) await replySlip(event.replyToken, slip); // null = stay silent (non-slip photo in a group)
+    return;
+  }
+
+  if (inGroup) {
+    // Groups: ignore stickers/video/audio/files and any text not addressed to "น้องแอดมิน".
+    if (event.message.type !== "text") return;
+    const question = groupQuestion(event.message.text);
+    if (question === null) return;
+    await answerWithGemini(event.replyToken, question);
+    return;
+  }
+
+  // 1:1 chat (unchanged).
   if (event.message.type !== "text") {
     await reply(event.replyToken, UNSUPPORTED_MESSAGE_REPLY);
     return;
   }
 
-  const faq = await getFaq();
-  const answer = faq ? await askGemini(faq, event.message.text) : DEFAULT_REPLY;
-  await reply(event.replyToken, answer);
+  await answerWithGemini(event.replyToken, event.message.text);
 }
 
 export async function POST(req: Request): Promise<Response> {

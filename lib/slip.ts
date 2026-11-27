@@ -282,23 +282,40 @@ function formatAmount(amount: number | undefined): string {
 
 // ---- Main ----
 
+export type SlipContext = {
+  /** LINE source.type: "user" (1:1), "group" or "room". Logged; never the group/user id. */
+  sourceType: string;
+};
+
 /**
  * Verifies a LINE image message as a bank transfer slip.
- * Verified results (ok / duplicate / receiver mismatch) reply with a Flex card plus a short text;
+ * 1:1 chat: verified results (ok / duplicate / receiver mismatch) reply with a Flex card plus a short text;
  * errors reply with plain text only.
+ * Group/room: the Flex card only (no short text), and a non-slip image (SLIP_NOT_FOUND) gets no reply (null).
  */
-export async function checkSlip(messageId: string, contentProviderType: string): Promise<SlipReply> {
-  const reply = await checkSlipInner(messageId, contentProviderType);
+export async function checkSlip(
+  messageId: string,
+  contentProviderType: string,
+  ctx: SlipContext = { sourceType: "user" },
+): Promise<SlipReply | null> {
+  const reply = await checkSlipInner(messageId, contentProviderType, ctx);
+  if (reply === null) return null;
   return typeof reply === "string" ? { messages: [textMessage(reply)] } : reply;
 }
 
-async function checkSlipInner(messageId: string, contentProviderType: string): Promise<SlipReply | string> {
+async function checkSlipInner(
+  messageId: string,
+  contentProviderType: string,
+  ctx: SlipContext,
+): Promise<SlipReply | string | null> {
   const startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
+  const { sourceType } = ctx;
+  const inGroup = sourceType === "group" || sourceType === "room";
 
   const apiKey = process.env.EASYSLIP_API_KEY?.trim();
   if (!apiKey) {
-    console.error("SLIP_DISABLED", { reason: "EASYSLIP_API_KEY not set" });
+    console.error("SLIP_DISABLED", { reason: "EASYSLIP_API_KEY not set", sourceType });
     return SLIP_REPLY.error;
   }
 
@@ -326,6 +343,7 @@ async function checkSlipInner(messageId: string, contentProviderType: string): P
       receiverMatched,
       matchedBy: receiverCheck?.matchedBy,
       matchedIndex: receiverCheck?.matchedIndex,
+      sourceType,
       elapsedMs: elapsed(),
     });
 
@@ -351,20 +369,23 @@ async function checkSlipInner(messageId: string, contentProviderType: string): P
       sender: toCardParty(data.rawSlip.sender),
       receiver: toCardParty(data.rawSlip.receiver),
     });
-    const shortText = status === "ok" ? SLIP_REPLY.okShort : plainText;
+    // In groups the card alone is enough; 1:1 chats also get the short text.
+    if (inGroup) return { messages: [flex], fallbackText: plainText };
 
+    const shortText = status === "ok" ? SLIP_REPLY.okShort : plainText;
     return { messages: [flex, textMessage(shortText)], fallbackText: plainText };
   } catch (err) {
     const code = err instanceof SlipError ? err.code : "UNEXPECTED_ERROR";
     const httpStatus = err instanceof SlipError ? err.httpStatus : (err as { status?: number })?.status;
-    console.error("SLIP_ERROR", { code, httpStatus, elapsedMs: elapsed() });
+    console.error("SLIP_ERROR", { code, httpStatus, sourceType, elapsedMs: elapsed() });
 
     switch (code) {
       case "IMAGE_TOO_LARGE":
       case "IMAGE_SIZE_TOO_LARGE":
         return SLIP_REPLY.tooLarge;
       case "SLIP_NOT_FOUND":
-        return SLIP_REPLY.notFound;
+        // A normal photo in a group: stay silent so the group isn't spammed.
+        return inGroup ? null : SLIP_REPLY.notFound;
       case "SLIP_PENDING":
         return SLIP_REPLY.pending;
       default:
