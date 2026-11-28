@@ -13,8 +13,9 @@ import {
   saveCart,
   saveCheckout,
   saveCustomer,
-  saveQuoteRequest,
 } from "./memory";
+import { adminDeps, queueQuoteRequest } from "./admin-redis";
+import { sendDraftToAdminGroup } from "./admin";
 import {
   continueCheckout,
   extractCustomerRules,
@@ -26,6 +27,7 @@ import {
   type CheckoutState,
   type CheckoutStep,
   type Customer,
+  type QuoteRequest,
 } from "./checkout";
 import {
   CLEAR_RE,
@@ -95,12 +97,14 @@ async function handleCheckout(
   if (!step || step.passThrough) return null;
 
   // The quote request must be stored before we tell the customer it was received.
+  let queued: QuoteRequest | null = null;
   if (step.quote) {
-    if (!(await saveQuoteRequest(step.quote))) return { messages: [QUOTE_SAVE_FAILED], afterReply: async () => {} };
+    queued = await queueQuoteRequest(step.quote);
+    if (!queued) return { messages: [QUOTE_SAVE_FAILED], afterReply: async () => {} };
     console.log("QUOTE_REQUESTED", {
-      requestId: step.quote.requestId,
-      itemCount: step.quote.items.length,
-      subtotal: step.quote.subtotal,
+      requestId: queued.requestId,
+      itemCount: queued.items.length,
+      subtotal: queued.subtotal,
     });
   }
   if (step.saveCustomer && (await saveCustomer(userId, step.saveCustomer.customer))) {
@@ -114,6 +118,15 @@ async function handleCheckout(
       const tasks: Promise<unknown>[] = [];
       if (finalStep.state !== undefined) tasks.push(saveCheckout(userId, finalStep.state));
       if (finalStep.clearCart) tasks.push(saveCart(userId, emptyCart()));
+      // Send the new request to the admin group (if none is set it just waits in the queue).
+      if (queued) {
+        const req = queued;
+        tasks.push(
+          sendDraftToAdminGroup(req, adminDeps()).catch((err) =>
+            console.error("ADMIN_ERROR", { op: "sendDraft", message: err instanceof Error ? err.message : String(err) }),
+          ),
+        );
+      }
       await Promise.all(tasks);
     },
   };

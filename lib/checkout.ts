@@ -22,16 +22,35 @@ export type CheckoutState = {
   draft: CustomerDraft;
 };
 
+export type QuoteItem = {
+  code: string;
+  name: string;
+  unit: string;
+  quantity: number;
+  unitPrice: number; // before VAT; the admin may change it ("ราคา #12 3=1200")
+  listPrice?: number; // the sheet price, kept when the admin changes unitPrice
+  discountPercent?: number; // set by the admin ("ส่วนลด #12 1-2=23%")
+};
+
+export type IssuerKey = "wujin" | "kreungyen";
+
 export type QuoteRequest = {
   requestId: string;
-  status: "pending";
+  /** Short number for admin commands (#1, #2, ...), assigned when the request is queued. */
+  shortId?: number;
+  status: "pending" | "approved" | "rejected";
   userId: string;
   customer: Customer;
-  items: { code: string; name: string; unit: string; quantity: number; unitPrice: number }[];
-  subtotal: number; // baht, before VAT (for the admin; the admin confirms the final price)
+  items: QuoteItem[];
+  subtotal: number; // baht, before VAT (recomputed by the admin draft)
   vat: number;
   total: number;
   createdAt: string; // ISO
+  issuer?: IssuerKey; // company issuing the quote; required before approval
+  reference?: string;
+  quoteNo?: string; // BQyymm-nnnn, set on approval
+  approvedAt?: string;
+  rejectedAt?: string;
 };
 
 /** What chat.ts must do after a checkout step. */

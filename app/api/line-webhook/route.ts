@@ -3,6 +3,8 @@ import { askGemini } from "@/lib/gemini";
 import { getFaq } from "@/lib/sheet";
 import { checkSlip, type SlipReply } from "@/lib/slip";
 import { handleChat } from "@/lib/chat";
+import { handleGroupText } from "@/lib/admin";
+import { adminDeps } from "@/lib/admin-redis";
 import { DEFAULT_REPLY, GROUP_JOIN_REPLY, GROUP_TRIGGER, UNSUPPORTED_MESSAGE_REPLY } from "@/lib/constants";
 
 export const runtime = "nodejs";
@@ -100,6 +102,25 @@ async function handleEvent(event: WebhookEvent): Promise<void> {
   if (inGroup) {
     // Groups: ignore stickers/video/audio/files and any text not addressed to "น้องแอดมิน".
     if (event.message.type !== "text") return;
+
+    // "ตั้งเป็นกลุ่มแอดมิน <code>" in any group, and admin commands in the admin group.
+    // In the admin group only commands get a reply (and slips, handled above).
+    if (event.source.type === "group") {
+      try {
+        const admin = await handleGroupText(event.message.text, event.source.groupId, adminDeps());
+        if (admin.handled) {
+          if (admin.messages.length > 0) {
+            await replyMessages(event.replyToken, admin.messages.map((text): messagingApi.Message => ({ type: "text", text })));
+          }
+          return;
+        }
+      } catch (err) {
+        // e.g. Redis down mid-command; never log ids or the setup code.
+        console.error("ADMIN_ERROR", { message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+    }
+
     const question = groupQuestion(event.message.text);
     if (question === null) return;
     await answerWithGemini(event.replyToken, question);

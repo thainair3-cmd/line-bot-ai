@@ -6,7 +6,7 @@ import {
   MEMORY_MAX_TEXT_LENGTH,
   MEMORY_TTL_SECONDS,
 } from "./constants";
-import type { CheckoutState, Customer, QuoteRequest } from "./checkout";
+import type { CheckoutState, Customer } from "./checkout";
 import type { Cart } from "./cart-ops";
 
 export type HistoryEntry = { role: "user" | "bot"; text: string };
@@ -67,8 +67,6 @@ export async function saveCart(userId: string, cart: Cart): Promise<boolean> {
 
 const customerKey = (userId: string) => `customer:${userId}`; // no expiry: reused next time
 const checkoutKey = (userId: string) => `chat:checkout:${userId}`;
-const quoteRequestKey = (requestId: string) => `quote:request:${requestId}`; // no expiry
-export const QUOTE_PENDING_LIST = "quote:pending"; // requestIds waiting for admin approval (stage 3)
 
 export async function loadCustomer(userId: string): Promise<Customer | null> {
   return redisOp("loadCustomer", (r) => r.get<Customer>(customerKey(userId)));
@@ -92,15 +90,6 @@ export async function saveCheckout(userId: string, state: CheckoutState | null):
   const ok = await redisOp("saveCheckout", async (r) => {
     if (state) await r.set(key, state, { ex: CHECKOUT_TTL_SECONDS });
     else await r.del(key);
-    return true;
-  });
-  return ok === true;
-}
-
-/** Stores the pending quote request and queues it for the admin. Returns false if Redis failed. */
-export async function saveQuoteRequest(req: QuoteRequest): Promise<boolean> {
-  const ok = await redisOp("saveQuoteRequest", async (r) => {
-    await r.multi().set(quoteRequestKey(req.requestId), req).lpush(QUOTE_PENDING_LIST, req.requestId).exec();
     return true;
   });
   return ok === true;

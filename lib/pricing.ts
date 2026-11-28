@@ -20,12 +20,15 @@ export function parsePrice(raw: string): number | null {
   return Number(cleaned);
 }
 
-/** ROUND(price * quantity, 2) in satang. */
-export function lineTotalSatang(unitPrice: number, quantity: number): number {
-  return roundHalfAwayFromZero(unitPrice * quantity * 100);
+/**
+ * ROUND(quantity * price * (1 - discount%), 2) in satang.
+ * price * quantity * (100 - discount) is the same amount in satang, with no extra division.
+ */
+export function lineTotalSatang(unitPrice: number, quantity: number, discountPercent = 0): number {
+  return roundHalfAwayFromZero(unitPrice * quantity * (100 - discountPercent));
 }
 
-export type QuoteInput = { unitPrice: number; quantity: number };
+export type QuoteInput = { unitPrice: number; quantity: number; discountPercent?: number };
 export type Quote = {
   lineTotals: number[]; // satang, one per line
   subtotal: number; // รวมเป็นเงิน (satang)
@@ -34,7 +37,7 @@ export type Quote = {
 };
 
 export function calcQuote(lines: QuoteInput[]): Quote {
-  const lineTotals = lines.map((l) => lineTotalSatang(l.unitPrice, l.quantity));
+  const lineTotals = lines.map((l) => lineTotalSatang(l.unitPrice, l.quantity, l.discountPercent ?? 0));
   const subtotal = lineTotals.reduce((a, b) => a + b, 0);
   const vat = roundHalfAwayFromZero((subtotal * VAT_PERCENT) / 100);
   return { lineTotals, subtotal, vat, total: subtotal + vat };
