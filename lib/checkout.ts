@@ -32,7 +32,8 @@ export type QuoteItem = {
   discountPercent?: number; // set by the admin ("ส่วนลด #12 1-2=23%")
 };
 
-export type IssuerKey = "wujin" | "kreungyen";
+import type { IssuerKey } from "./companies.ts";
+export type { IssuerKey };
 
 export type QuoteRequest = {
   requestId: string;

@@ -4,22 +4,10 @@
 // Imports use .ts extensions so `node --test` can load this file without a bundler.
 import { timingSafeEqual } from "node:crypto";
 import { calcQuote, formatBaht, formatQuantity, formatSatang } from "./pricing.ts";
-import type { IssuerKey, QuoteItem, QuoteRequest } from "./checkout.ts";
+import type { QuoteItem, QuoteRequest } from "./checkout.ts";
+import { COMPANIES as ISSUERS, QUOTE_DEFAULTS as QUOTE_TERMS, parseIssuer, type IssuerKey } from "./companies.ts";
 
-// ---- Issuing companies ----
-
-export const ISSUERS: Record<IssuerKey, { label: string; aliases: RegExp }> = {
-  wujin: { label: "วู่จิน", aliases: /วู่?จิน|wu\s*jin/i },
-  kreungyen: { label: "เครื่องเย็น", aliases: /เครื่องเย็น|kreung\s*yen/i },
-};
-
-export function parseIssuer(text: string): IssuerKey | null {
-  for (const key of Object.keys(ISSUERS) as IssuerKey[]) if (ISSUERS[key].aliases.test(text)) return key;
-  return null;
-}
-
-/** Terms printed on every quote (stage 4 PDF). */
-export const QUOTE_TERMS = { validityDays: 3, payment: "เงินสด" } as const;
+export { parseIssuer };
 
 // ---- Storage / LINE interface ----
 
@@ -30,6 +18,8 @@ export type ApprovedQuote = {
   userId: string;
   issuer: IssuerKey;
   issuerLabel: string;
+  /** Snapshot of the issuing company at approval time (header of the PDF). */
+  issuerCompany: { name: string; address: string; phone: string };
   customer: QuoteRequest["customer"];
   items: (QuoteItem & { discountPercent: number; lineTotal: number })[];
   subtotal: number; // baht
@@ -347,6 +337,11 @@ export async function handleGroupText(text: string, groupId: string | undefined,
         userId: req.userId,
         issuer: req.issuer,
         issuerLabel: ISSUERS[req.issuer].label,
+        issuerCompany: {
+          name: ISSUERS[req.issuer].name,
+          address: ISSUERS[req.issuer].address,
+          phone: ISSUERS[req.issuer].phone,
+        },
         customer: req.customer,
         items: req.items.map((i, k) => ({ ...i, discountPercent: i.discountPercent ?? 0, lineTotal: q.lineTotals[k] / 100 })),
         subtotal: q.subtotal / 100,

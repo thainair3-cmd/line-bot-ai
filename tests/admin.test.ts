@@ -189,6 +189,11 @@ test("อนุมัติครบ -> BQ6911-0001 แจ้งลูกค้�
   const q = t.mem.approved[0];
   assert.equal(q.quoteNo, "BQ6911-0001");
   assert.equal(q.issuer, "wujin");
+  assert.deepEqual(q.issuerCompany, {
+    name: "บริษัท ไทยแน่ วู่จิน จำกัด",
+    address: "224/50-52 ถนนหลานหลวง แขวงคลองมหานาค เขตป้อมปราบศัตรูพ่าย กรุงเทพฯ 10100",
+    phone: "T:(092)514-1030 (02)-121-4505",
+  });
   assert.equal(q.reference, "PO-7788");
   assert.equal(q.validityDays, 3);
   assert.equal(q.payment, "เงินสด");
